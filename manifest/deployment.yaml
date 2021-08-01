@@ -1,0 +1,27 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: trivy-provider
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      run: trivy-provider
+  template:
+    metadata:
+      labels:
+        run: trivy-provider
+    spec:
+      containers:
+      - image: sozercan/trivy-provider:latest
+        imagePullPolicy: Always
+        name: trivy-provider
+        env:
+        - name: REMOTE_URL
+          value: "10.96.168.196:4954"
+        ports:
+        - containerPort: 8090
+          protocol: TCP
+      restartPolicy: Always
+      nodeSelector:
+        kubernetes.io/os: linux

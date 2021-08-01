@@ -1,0 +1,9 @@
+apiVersion: externaldata.gatekeeper.sh/v1alpha1
+kind: Provider
+metadata:
+  name: trivy-provider
+spec:
+  proxyURL: http://10.96.214.15:8090/validate
+  timeout: 10
+  failurePolicy: fail
+  maxRetry: 5

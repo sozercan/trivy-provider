@@ -1,0 +1,19 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: signed-deployment
+  labels:
+    app: signed-deployment
+spec:
+  replicas: 0
+  selector:
+    matchLabels:
+      app: signed-deployment
+  template:
+    metadata:
+      labels:
+        app: signed-deployment
+    spec:
+      containers:
+      - name: static
+        image: gcr.io/distroless/static:latest
