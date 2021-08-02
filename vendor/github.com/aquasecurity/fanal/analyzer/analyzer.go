@@ -2,7 +2,6 @@ package analyzer
 
 import (
 	"context"
-	"fmt"
 	"os"
 	"sort"
 	"strings"
@@ -12,12 +11,13 @@ import (
 	"golang.org/x/xerrors"
 
 	aos "github.com/aquasecurity/fanal/analyzer/os"
+	"github.com/aquasecurity/fanal/log"
 	"github.com/aquasecurity/fanal/types"
 )
 
 var (
-	analyzers       []analyzer
-	configAnalyzers []configAnalyzer
+	analyzers       = map[Type]analyzer{}
+	configAnalyzers = map[Type]configAnalyzer{}
 
 	// ErrUnknownOS occurs when unknown OS is analyzed.
 	ErrUnknownOS = xerrors.New("unknown OS")
@@ -28,6 +28,7 @@ var (
 )
 
 type AnalysisTarget struct {
+	Dir      string
 	FilePath string
 	Content  []byte
 }
@@ -47,11 +48,11 @@ type configAnalyzer interface {
 }
 
 func RegisterAnalyzer(analyzer analyzer) {
-	analyzers = append(analyzers, analyzer)
+	analyzers[analyzer.Type()] = analyzer
 }
 
 func RegisterConfigAnalyzer(analyzer configAnalyzer) {
-	configAnalyzers = append(configAnalyzers, analyzer)
+	configAnalyzers[analyzer.Type()] = analyzer
 }
 
 type Opener func() ([]byte, error)
@@ -73,13 +74,24 @@ func (r *AnalysisResult) Sort() {
 		return r.PackageInfos[i].FilePath < r.PackageInfos[j].FilePath
 	})
 
+	for _, pi := range r.PackageInfos {
+		sort.Slice(pi.Packages, func(i, j int) bool {
+			return pi.Packages[i].Name < pi.Packages[j].Name
+		})
+	}
+
 	sort.Slice(r.Applications, func(i, j int) bool {
 		return r.Applications[i].FilePath < r.Applications[j].FilePath
 	})
 
-	sort.Slice(r.Configs, func(i, j int) bool {
-		return r.Configs[i].FilePath < r.Configs[j].FilePath
-	})
+	for _, app := range r.Applications {
+		sort.Slice(app.Libraries, func(i, j int) bool {
+			if app.Libraries[i].Library.Name != app.Libraries[j].Library.Name {
+				return app.Libraries[i].Library.Name < app.Libraries[j].Library.Name
+			}
+			return app.Libraries[i].Library.Version < app.Libraries[j].Library.Version
+		})
+	}
 }
 
 func (r *AnalysisResult) Merge(new *AnalysisResult) {
@@ -108,85 +120,72 @@ func (r *AnalysisResult) Merge(new *AnalysisResult) {
 		r.Applications = append(r.Applications, new.Applications...)
 	}
 
-	if len(new.Configs) > 0 {
-		r.Configs = append(r.Configs, new.Configs...)
+	for _, m := range new.Configs {
+		r.Configs = append(r.Configs, m)
 	}
 }
 
 type Analyzer struct {
-	drivers       []analyzer
-	configDrivers []configAnalyzer
-	disabled      []Type
+	drivers           []analyzer
+	configDrivers     []configAnalyzer
+	disabledAnalyzers []Type
 }
 
 func NewAnalyzer(disabledAnalyzers []Type) Analyzer {
 	var drivers []analyzer
-	for _, a := range analyzers {
-		if isDisabled(a.Type(), disabledAnalyzers) {
+	for analyzerType, a := range analyzers {
+		if isDisabled(analyzerType, disabledAnalyzers) {
 			continue
 		}
 		drivers = append(drivers, a)
 	}
 
 	var configDrivers []configAnalyzer
-	for _, a := range configAnalyzers {
-		if isDisabled(a.Type(), disabledAnalyzers) {
+	for analyzerType, a := range configAnalyzers {
+		if isDisabled(analyzerType, disabledAnalyzers) {
 			continue
 		}
 		configDrivers = append(configDrivers, a)
 	}
 
 	return Analyzer{
-		drivers:       drivers,
-		configDrivers: configDrivers,
-		disabled:      disabledAnalyzers,
+		drivers:           drivers,
+		configDrivers:     configDrivers,
+		disabledAnalyzers: disabledAnalyzers,
 	}
 }
 
-// AnalyzerVersions returns analyzer version identifier used for cache suffixes.
-// e.g. alpine: 1, amazon: 3, debian: 2 => 132
-// When the amazon analyzer is disabled => 102
-func (a Analyzer) AnalyzerVersions() string {
-	// Sort analyzers for the consistent version identifier
-	sorted := make([]analyzer, len(analyzers))
-	copy(sorted, analyzers)
-	sort.Slice(sorted, func(i, j int) bool {
-		return sorted[i].Type() < sorted[j].Type()
-	})
-
-	var versions string
-	for _, s := range sorted {
-		if isDisabled(s.Type(), a.disabled) {
-			versions += "0"
+// AnalyzerVersions returns analyzer version identifier used for cache keys.
+func (a Analyzer) AnalyzerVersions() map[string]int {
+	versions := map[string]int{}
+	for analyzerType, aa := range analyzers {
+		if isDisabled(analyzerType, a.disabledAnalyzers) {
+			versions[string(analyzerType)] = 0
 			continue
 		}
-		versions += fmt.Sprint(s.Version())
+		versions[string(analyzerType)] = aa.Version()
 	}
 	return versions
 }
 
-// ImageConfigAnalyzerVersions returns analyzer version identifier used for cache suffixes.
-func (a Analyzer) ImageConfigAnalyzerVersions() string {
-	// Sort image config analyzers for the consistent version identifier.
-	sorted := make([]configAnalyzer, len(configAnalyzers))
-	copy(sorted, configAnalyzers)
-	sort.Slice(sorted, func(i, j int) bool {
-		return sorted[i].Type() < sorted[j].Type()
-	})
-
-	var versions string
-	for _, s := range sorted {
-		if isDisabled(s.Type(), a.disabled) {
-			versions += "0"
+// ImageConfigAnalyzerVersions returns analyzer version identifier used for cache keys.
+func (a Analyzer) ImageConfigAnalyzerVersions() map[string]int {
+	versions := map[string]int{}
+	for _, ca := range configAnalyzers {
+		if isDisabled(ca.Type(), a.disabledAnalyzers) {
+			versions[string(ca.Type())] = 0
 			continue
 		}
-		versions += fmt.Sprint(s.Version())
+		versions[string(ca.Type())] = ca.Version()
 	}
 	return versions
 }
 
 func (a Analyzer) AnalyzeFile(ctx context.Context, wg *sync.WaitGroup, limit *semaphore.Weighted, result *AnalysisResult,
-	filePath string, info os.FileInfo, opener Opener) error {
+	dir, filePath string, info os.FileInfo, opener Opener) error {
+	if info.IsDir() {
+		return nil
+	}
 	for _, d := range a.drivers {
 		// filepath extracted from tar file doesn't have the prefix "/"
 		if !d.Required(strings.TrimLeft(filePath, "/"), info) {
@@ -207,11 +206,12 @@ func (a Analyzer) AnalyzeFile(ctx context.Context, wg *sync.WaitGroup, limit *se
 			defer wg.Done()
 
 			ret, err := a.Analyze(target)
-			if err != nil {
+			if err != nil && !xerrors.Is(err, aos.AnalyzeOSError) {
+				log.Logger.Debugf("Analysis error: %s", err)
 				return
 			}
 			result.Merge(ret)
-		}(d, AnalysisTarget{FilePath: filePath, Content: b})
+		}(d, AnalysisTarget{Dir: dir, FilePath: filePath, Content: b})
 	}
 	return nil
 }

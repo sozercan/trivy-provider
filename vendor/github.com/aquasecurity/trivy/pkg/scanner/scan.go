@@ -10,7 +10,6 @@ import (
 	aimage "github.com/aquasecurity/fanal/artifact/image"
 	flocal "github.com/aquasecurity/fanal/artifact/local"
 	"github.com/aquasecurity/fanal/artifact/remote"
-	"github.com/aquasecurity/fanal/cache"
 	"github.com/aquasecurity/fanal/image"
 	ftypes "github.com/aquasecurity/fanal/types"
 	"github.com/aquasecurity/trivy/pkg/log"
@@ -83,7 +82,8 @@ type Scanner struct {
 
 // Driver defines operations of scanner
 type Driver interface {
-	Scan(target string, imageID string, layerIDs []string, options types.ScanOptions) (results report.Results, osFound *ftypes.OS, eols bool, err error)
+	Scan(target string, imageID string, layerIDs []string, options types.ScanOptions) (
+		results report.Results, osFound *ftypes.OS, eols bool, err error)
 }
 
 // NewScanner is the factory method of Scanner
@@ -92,28 +92,30 @@ func NewScanner(driver Driver, ar artifact.Artifact) Scanner {
 }
 
 // ScanArtifact scans the artifacts and returns results
-func (s Scanner) ScanArtifact(ctx context.Context, options types.ScanOptions) (report.Results, error) {
+func (s Scanner) ScanArtifact(ctx context.Context, options types.ScanOptions) (report.Report, error) {
 	artifactInfo, err := s.artifact.Inspect(ctx)
 	if err != nil {
-		return nil, xerrors.Errorf("failed analysis: %w", err)
+		return report.Report{}, xerrors.Errorf("failed analysis: %w", err)
 	}
-
-	// Debug information
-	var blobIDs []string
-	for _, b := range artifactInfo.BlobIDs {
-		blobIDs = append(blobIDs, cache.TrimVersionSuffix(b))
-	}
-	log.Logger.Debugf("Artifact ID: %s", cache.TrimVersionSuffix(artifactInfo.ID))
-	log.Logger.Debugf("Blob IDs: %v", blobIDs)
 
 	results, osFound, eosl, err := s.driver.Scan(artifactInfo.Name, artifactInfo.ID, artifactInfo.BlobIDs, options)
 	if err != nil {
-		return nil, xerrors.Errorf("scan failed: %w", err)
+		return report.Report{}, xerrors.Errorf("scan failed: %w", err)
 	}
 	if eosl {
 		log.Logger.Warnf("This OS version is no longer supported by the distribution: %s %s", osFound.Family, osFound.Name)
 		log.Logger.Warnf("The vulnerability detection may be insufficient because security updates are not provided")
 	}
 
-	return results, nil
+	return report.Report{
+		SchemaVersion: report.SchemaVersion,
+		ArtifactName:  artifactInfo.Name,
+		ArtifactType:  artifactInfo.Type,
+		Metadata: report.Metadata{
+			OS:          osFound,
+			RepoTags:    artifactInfo.RepoTags,
+			RepoDigests: artifactInfo.RepoDigests,
+		},
+		Results: results,
+	}, nil
 }

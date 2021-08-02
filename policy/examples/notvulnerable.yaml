@@ -1,18 +1,18 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: signed-deployment
+  name: notvulnerable-deployment
   labels:
-    app: signed-deployment
+    app: notvulnerable-deployment
 spec:
   replicas: 0
   selector:
     matchLabels:
-      app: signed-deployment
+      app: notvulnerable-deployment
   template:
     metadata:
       labels:
-        app: signed-deployment
+        app: notvulnerable-deployment
     spec:
       containers:
       - name: static

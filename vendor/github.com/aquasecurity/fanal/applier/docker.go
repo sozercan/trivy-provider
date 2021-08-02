@@ -71,6 +71,7 @@ func ApplyLayers(layers []types.BlobInfo) types.ArtifactDetail {
 	var mergedLayer types.ArtifactDetail
 
 	for _, layer := range layers {
+		mergedLayer.Size += layer.Size
 		for _, opqDir := range layer.OpaqueDirs {
 			_ = nestedMap.DeleteByString(opqDir, sep)
 		}
@@ -88,7 +89,7 @@ func ApplyLayers(layers []types.BlobInfo) types.ArtifactDetail {
 		for _, app := range layer.Applications {
 			nestedMap.SetByString(app.FilePath, sep, app)
 		}
-		for _, config := range layer.Configs {
+		for _, config := range layer.Misconfigurations {
 			config.Layer = types.Layer{
 				Digest: layer.Digest,
 				DiffID: layer.DiffID,
@@ -103,8 +104,8 @@ func ApplyLayers(layers []types.BlobInfo) types.ArtifactDetail {
 			mergedLayer.Packages = append(mergedLayer.Packages, v.Packages...)
 		case types.Application:
 			mergedLayer.Applications = append(mergedLayer.Applications, v)
-		case types.Config:
-			mergedLayer.Configs = append(mergedLayer.Configs, v)
+		case types.Misconfiguration:
+			mergedLayer.Misconfigurations = append(mergedLayer.Misconfigurations, v)
 		}
 		return nil
 	})

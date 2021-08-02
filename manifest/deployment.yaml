@@ -18,7 +18,7 @@ spec:
         name: trivy-provider
         env:
         - name: REMOTE_URL
-          value: "10.96.168.196:4954"
+          value: "http://trivy.default:4954"
         ports:
         - containerPort: 8090
           protocol: TCP
