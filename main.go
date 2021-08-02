@@ -16,26 +16,23 @@ import (
 	"github.com/aquasecurity/trivy/pkg/rpc/client"
 	"github.com/aquasecurity/trivy/pkg/scanner"
 	"github.com/aquasecurity/trivy/pkg/types"
-	"github.com/davecgh/go-spew/spew"
 	"github.com/go-logr/logr"
 	"github.com/go-logr/zapr"
 	"go.uber.org/zap"
 )
 
-const outputType = "json"
-
 var log logr.Logger
 
 func main() {
-	fmt.Println("starting server...")
-	http.HandleFunc("/validate", validate)
-
 	zapLog, err := zap.NewDevelopment()
 	if err != nil {
 		panic(fmt.Sprintf("unable to initialize logger: %v", err))
 	}
 	log = zapr.NewLogger(zapLog)
 	log.WithName("trivy-provider")
+
+	log.Info("starting server...")
+	http.HandleFunc("/validate", validate)
 
 	if err = http.ListenAndServe(":8090", nil); err != nil {
 		panic(err)
@@ -47,7 +44,8 @@ func validate(w http.ResponseWriter, req *http.Request) {
 
 	body, err := ioutil.ReadAll(req.Body)
 	if err != nil {
-		panic(err)
+		log.Error(err, "unable to read request body")
+		return
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second*1000)
@@ -63,9 +61,6 @@ func validate(w http.ResponseWriter, req *http.Request) {
 		log.Error(err, "unable to initialize scanner")
 		return
 	}
-
-	//spew.Dump(sc)
-
 	defer cleanUp()
 
 	scanOpts := types.ScanOptions{
@@ -79,30 +74,25 @@ func validate(w http.ResponseWriter, req *http.Request) {
 	report, err := sc.ScanArtifact(ctx, scanOpts)
 	if err != nil {
 		log.Error(err, "unable to scan image")
+		return
 	}
-
-	spew.Dump(report)
-
-	log.Info("validate", "results", report.Results)
 
 	if len(report.Results) > 0 {
 		log.Info("validate", "vulnerabilities found", len(report.Results[0].Vulnerabilities))
 
-		// reportOpts := report.Option {
-		// 	Severities: []dbTypes.Severity{dbTypes.SeverityUnknown},
-		// 	OutputTemplate: outputType,
-		// }
-		// if err = report.Write(results, reportOpts); err != nil {
-		// 	log.Error(err, "could not write results")
-		// }
-
 		w.WriteHeader(http.StatusOK)
-		json.NewEncoder(w).Encode(len(report.Results[0].Vulnerabilities))
+		if err = json.NewEncoder(w).Encode(len(report.Results[0].Vulnerabilities)); err != nil {
+			log.Error(err, "unable to encode output")
+			return
+		}
 	} else {
 		log.Info("validate", "no vulnerabilities found", image)
 
 		w.WriteHeader(http.StatusOK)
-		json.NewEncoder(w).Encode(0)
+		if err = json.NewEncoder(w).Encode(0); err != nil {
+			log.Error(err, "unable to encode output")
+			return
+		}
 	}
 }
 
