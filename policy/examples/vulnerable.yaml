@@ -5,7 +5,7 @@ metadata:
   labels:
     app: vulnerable-deployment
 spec:
-  replicas: 0
+  replicas: 0 # testing purposes only
   selector:
     matchLabels:
       app: vulnerable-deployment
@@ -15,7 +15,7 @@ spec:
         app: vulnerable-deployment
     spec:
       containers:
-      - name: kubectl
-        image: mcr.microsoft.com/oss/kubernetes/kubectl:v1.20.8
-      - name: nginx
-        image: nginx:1.15.2
+      - name: alpine1
+        image: alpine:3.10.0
+      - name: alpine2
+        image: alpine:3.11.0

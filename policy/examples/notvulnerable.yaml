@@ -5,7 +5,7 @@ metadata:
   labels:
     app: notvulnerable-deployment
 spec:
-  replicas: 0
+  replicas: 0 # testing purposes only
   selector:
     matchLabels:
       app: notvulnerable-deployment
