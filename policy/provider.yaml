@@ -4,6 +4,6 @@ metadata:
   name: trivy-provider
 spec:
   proxyURL: http://trivy-provider.default:8090/validate
-  timeout: 1
+  timeout: 3
   failurePolicy: Fail
   maxRetry: 1

@@ -1,6 +1,10 @@
 # trivy-provider
 
+trivy-provider is used for validating whether images contain vulnerabilities using [trivy](https://github.com/aquasecurity/trivy).
+
 > This repo is meant for testing Gatekeeper external data feature. Do not use for production.
+
+## Installation
 
 - Deploy Gatekeeper with external data enabled (`--enable-external-data`)
 
@@ -15,6 +19,8 @@
 - `kubectl apply -f policy/template.yaml`
 
 - `kubectl apply -f policy/constraint.yaml`
+
+## Verification
 
 - `kubectl apply -f policy/examples/vulnerable.yaml`
   - Request should be rejected

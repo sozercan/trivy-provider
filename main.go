@@ -9,19 +9,17 @@ import (
 	"os"
 	"time"
 
-	"github.com/aquasecurity/fanal/analyzer/config"
-	fimage "github.com/aquasecurity/fanal/artifact/image"
-	"github.com/aquasecurity/fanal/image"
-	"github.com/aquasecurity/trivy/pkg/cache"
 	"github.com/aquasecurity/trivy/pkg/rpc/client"
-	"github.com/aquasecurity/trivy/pkg/scanner"
 	"github.com/aquasecurity/trivy/pkg/types"
 	"github.com/go-logr/logr"
 	"github.com/go-logr/zapr"
+	"github.com/sozercan/trivy-provider/pkg/trivy"
 	"go.uber.org/zap"
 )
 
 var log logr.Logger
+
+const timeout = 3 * time.Second
 
 func main() {
 	zapLog, err := zap.NewDevelopment()
@@ -48,7 +46,7 @@ func validate(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second*1000)
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
 	image := string(body)
@@ -56,12 +54,12 @@ func validate(w http.ResponseWriter, req *http.Request) {
 
 	log.Info("validate", "image", image, "remote", remote)
 
-	sc, cleanUp, err := initializeDockerScanner(ctx, image, client.CustomHeaders{}, client.RemoteURL(remote), time.Second*5000)
+	s, cleanup, err := trivy.InitializeDockerScanner(ctx, image, client.CustomHeaders{}, client.RemoteURL(remote), timeout)
 	if err != nil {
 		log.Error(err, "unable to initialize scanner")
 		return
 	}
-	defer cleanUp()
+	defer cleanup()
 
 	scanOpts := types.ScanOptions{
 		VulnType:            []string{"os", "library"},
@@ -71,7 +69,7 @@ func validate(w http.ResponseWriter, req *http.Request) {
 		SkipFiles:           []string{},
 		SkipDirs:            []string{},
 	}
-	report, err := sc.ScanArtifact(ctx, scanOpts)
+	report, err := s.ScanArtifact(ctx, scanOpts)
 	if err != nil {
 		log.Error(err, "unable to scan image")
 		return
@@ -94,26 +92,4 @@ func validate(w http.ResponseWriter, req *http.Request) {
 			return
 		}
 	}
-}
-
-func initializeDockerScanner(ctx context.Context, imageName string, customHeaders client.CustomHeaders, url client.RemoteURL, timeout time.Duration) (scanner.Scanner, func(), error) {
-	scannerScanner := client.NewProtobufClient(url)
-	clientScanner := client.NewScanner(customHeaders, scannerScanner)
-	artifactCache := cache.NewRemoteCache(cache.RemoteURL(url), nil)
-	dockerOption, err := types.GetDockerOption(timeout)
-	if err != nil {
-		return scanner.Scanner{}, nil, err
-	}
-	imageImage, cleanup, err := image.NewDockerImage(ctx, imageName, dockerOption)
-	if err != nil {
-		return scanner.Scanner{}, nil, err
-	}
-	artifact, err := fimage.NewArtifact(imageImage, artifactCache, nil, config.ScannerOption{})
-	if err != nil {
-		return scanner.Scanner{}, nil, err
-	}
-	scanner2 := scanner.NewScanner(clientScanner, artifact)
-	return scanner2, func() {
-		cleanup()
-	}, nil
 }
