@@ -13,7 +13,7 @@ spec:
         run: trivy-provider
     spec:
       containers:
-      - image: sozercan/trivy-provider:latest
+      - image: sozercan/trivy-provider:v0.0.1
         imagePullPolicy: Always
         name: trivy-provider
         env:
