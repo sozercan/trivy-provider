@@ -7,14 +7,26 @@ trivy-provider is used for validating whether images contain vulnerabilities usi
 ## Installation
 
 - Deploy Gatekeeper with external data enabled (`--enable-external-data`)
+```sh
+helm repo add gatekeeper https://open-policy-agent.github.io/gatekeeper/charts
+helm install gatekeeper/gatekeeper  \
+    --name-template=gatekeeper \
+    --namespace gatekeeper-system --create-namespace \
+    --set enableExternalData=true \
+    --set controllerManager.dnsPolicy=ClusterFirst,audit.dnsPolicy=ClusterFirst
+```
 
 - Deploy Trivy server using Helm chart: https://github.com/aquasecurity/trivy/tree/main/helm/trivy
+```sh
+helm repo add aquasecurity https://aquasecurity.github.io/helm-charts/
+helm install trivy aquasecurity/trivy --namespace trivy --create-namespace
+```
 
 - `kubectl apply -f manifest`
-  - Update `REMOTE_URL` environment variable, if Trivy is not hosted in `http://trivy.default:4954` (default)
+  - > Update `REMOTE_URL` environment variable in the deployment, if Trivy service endpoint is not `http://trivy.trivy:4954` (default)
 
 - `kubectl apply -f policy/provider.yaml`
-  - Update `proxyURL` if it's not `http://trivy-provider.default:8090` (default)
+  - > Update `url` if it's not `http://trivy-provider.trivy-provider:8090` (default)
 
 - `kubectl apply -f policy/template.yaml`
 

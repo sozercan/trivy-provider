@@ -10,18 +10,14 @@ spec:
   targets:
     - target: admission.k8s.gatekeeper.sh
       rego: |
-        package k8ssignedimages
+        package k8svulnerableimages
 
         violation[{"msg": msg}] {
-          container := input_containers[_]
-          response := externaldata("trivy-provider", container.image)
-          response > 0
-          msg := sprintf("Image %v contains %v vulnerabilities", [container.image, response])
-        }
+          images := [img | img = input.review.object.spec.template.spec.containers[_].image]
+          response := external_data({"provider": "trivy-provider", "keys": images})
 
-        input_containers[c] {
-            c := input.review.object.spec.template.spec.containers[_]
-        }
-        input_containers[c] {
-            c := input.review.object.spec.template.spec.initContainers[_]
+          result := response.responses[_]
+          result[1] > 0
+
+          msg := sprintf("Image %v contains %v vulnerabilities", [result[0], result[1]])
         }

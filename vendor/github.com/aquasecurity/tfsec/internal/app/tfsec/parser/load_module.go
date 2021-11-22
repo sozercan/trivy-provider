@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/aquasecurity/tfsec/internal/app/tfsec/block"
+	"github.com/hashicorp/hcl/v2"
 
 	"github.com/aquasecurity/tfsec/internal/app/tfsec/metrics"
 
@@ -14,36 +15,39 @@ import (
 	"github.com/zclconf/go-cty/cty"
 )
 
-type ModuleInfo struct {
+type ModuleDefinition struct {
 	Name       string
 	Path       string
 	Definition block.Block
-	Blocks     block.Blocks
+	Modules    []block.Module
 }
 
 // LoadModules reads all module blocks and loads the underlying modules, adding blocks to e.moduleBlocks
-func LoadModules(blocks block.Blocks, projectBasePath string, metadata *ModulesMetadata, stopOnHCLError bool) []*ModuleInfo {
+func (e *Evaluator) loadModules(stopOnHCLError bool) []*ModuleDefinition {
 
-	var modules []*ModuleInfo
+	blocks := e.blocks
 
-	for _, moduleBlock := range blocks.OfType("module") {
+	var moduleDefinitions []*ModuleDefinition
+
+	expanded := e.expandBlocks(blocks.OfType("module"))
+
+	for _, moduleBlock := range expanded {
 		if moduleBlock.Label() == "" {
 			continue
 		}
-		module, err := loadModule(moduleBlock, projectBasePath, metadata, stopOnHCLError)
+		moduleDefinition, err := e.loadModule(moduleBlock, stopOnHCLError)
 		if err != nil {
 			_, _ = fmt.Fprintf(os.Stderr, "WARNING: Failed to load module: %s\n", err)
 			continue
 		}
-		metrics.Add(metrics.ModuleBlocksLoaded, len(module.Blocks))
-		modules = append(modules, module)
+		moduleDefinitions = append(moduleDefinitions, moduleDefinition)
 	}
 
-	return modules
+	return moduleDefinitions
 }
 
 // takes in a module "x" {} block and loads resources etc. into e.moduleBlocks - additionally returns variables to add to ["module.x.*"] variables
-func loadModule(b block.Block, projectBasePath string, metadata *ModulesMetadata, stopOnHCLError bool) (*ModuleInfo, error) {
+func (e *Evaluator) loadModule(b block.Block, stopOnHCLError bool) (*ModuleDefinition, error) {
 
 	if b.Label() == "" {
 		return nil, fmt.Errorf("module without label at %s", b.Range())
@@ -70,11 +74,11 @@ func loadModule(b block.Block, projectBasePath string, metadata *ModulesMetadata
 
 	var modulePath string
 
-	if metadata != nil {
+	if e.moduleMetadata != nil {
 		// if we have module metadata we can parse all the modules as they'll be cached locally!
-		for _, module := range metadata.Modules {
+		for _, module := range e.moduleMetadata.Modules {
 			if module.Source == source {
-				modulePath = filepath.Clean(filepath.Join(projectBasePath, module.Dir))
+				modulePath = filepath.Clean(filepath.Join(e.projectRootPath, module.Dir))
 				break
 			}
 		}
@@ -82,11 +86,12 @@ func loadModule(b block.Block, projectBasePath string, metadata *ModulesMetadata
 	if modulePath == "" {
 		// if we have no metadata, we can only support modules available on the local filesystem
 		// users wanting this feature should run a `terraform init` before running tfsec to cache all modules locally
-		if !strings.HasPrefix(source, "./") && !strings.HasPrefix(source, "../") {
+		if !strings.HasPrefix(source, fmt.Sprintf(".%c", os.PathSeparator)) && !strings.HasPrefix(source, fmt.Sprintf("..%c", os.PathSeparator)) {
 			return nil, fmt.Errorf("missing module with source '%s' -  try to 'terraform init' first", source)
 		}
 
-		modulePath = reconstructPath(projectBasePath, source)
+		// combine the current calling module with relative source of the module
+		modulePath = filepath.Join(e.modulePath, source)
 	}
 
 	var blocks block.Blocks
@@ -97,24 +102,12 @@ func loadModule(b block.Block, projectBasePath string, metadata *ModulesMetadata
 	debug.Log("Loaded module '%s' (requested at %s)", modulePath, b.Range())
 	metrics.Add(metrics.ModuleLoadCount, 1)
 
-	return &ModuleInfo{
+	return &ModuleDefinition{
 		Name:       b.Label(),
 		Path:       modulePath,
 		Definition: b,
-		Blocks:     blocks,
+		Modules:    []block.Module{block.NewHCLModule(e.projectRootPath, modulePath, blocks)},
 	}, nil
-}
-
-// This function takes the relative source path provided by `source` and reconstructs the absolute path
-// based on the project base path and the relative source path
-func reconstructPath(projectBasePath string, source string) string {
-
-	// get the parent directory until we reach the shared parent directory
-	for strings.HasPrefix(source, "../") {
-		projectBasePath = filepath.Dir(projectBasePath)
-		source = strings.TrimPrefix(source, "../")
-	}
-	return filepath.Join(projectBasePath, source)
 }
 
 func getModuleBlocks(b block.Block, modulePath string, blocks *block.Blocks, stopOnHCLError bool) error {
@@ -123,6 +116,7 @@ func getModuleBlocks(b block.Block, modulePath string, blocks *block.Blocks, sto
 		return fmt.Errorf("failed to load module %s: %w", b.Label(), err)
 	}
 
+	moduleCtx := block.NewContext(&hcl.EvalContext{}, nil)
 	for _, file := range moduleFiles {
 		fileBlocks, err := LoadBlocksFromFile(file)
 		if err != nil {
@@ -136,7 +130,7 @@ func getModuleBlocks(b block.Block, modulePath string, blocks *block.Blocks, sto
 			debug.Log("Added %d blocks from %s...", len(fileBlocks), fileBlocks[0].DefRange.Filename)
 		}
 		for _, fileBlock := range fileBlocks {
-			*blocks = append(*blocks, block.NewHCLBlock(fileBlock, nil, b))
+			*blocks = append(*blocks, block.NewHCLBlock(fileBlock, moduleCtx, b))
 		}
 	}
 	return nil

@@ -19,3 +19,21 @@ func OptionExcludeRules(ruleIDs []string) func(s *Scanner) {
 		s.excludedRuleIDs = ruleIDs
 	}
 }
+
+func OptionIncludeRules(ruleIDs []string) func(s *Scanner) {
+	return func(s *Scanner) {
+		s.includedRuleIDs = ruleIDs
+	}
+}
+
+func OptionStopOnErrors() func(s *Scanner) {
+	return func(s *Scanner) {
+		s.ignoreCheckErrors = false
+	}
+}
+
+func OptionWithWorkspaceName(workspaceName string) func(s *Scanner) {
+	return func(s *Scanner) {
+		s.workspaceName = workspaceName
+	}
+}
