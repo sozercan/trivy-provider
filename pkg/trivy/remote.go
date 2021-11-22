@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/aquasecurity/fanal/analyzer/config"
+	"github.com/aquasecurity/fanal/artifact"
 	fimage "github.com/aquasecurity/fanal/artifact/image"
 	"github.com/aquasecurity/fanal/image"
 	"github.com/aquasecurity/trivy/pkg/cache"
@@ -25,7 +26,12 @@ func InitializeDockerScanner(ctx context.Context, imageName string, customHeader
 	if err != nil {
 		return scanner.Scanner{}, nil, err
 	}
-	artifact, err := fimage.NewArtifact(imageImage, artifactCache, nil, config.ScannerOption{})
+
+	artifactOpt := artifact.Option{
+		SkipFiles: []string{},
+		SkipDirs:  []string{},
+	}
+	artifact, err := fimage.NewArtifact(imageImage, artifactCache, artifactOpt, config.ScannerOption{})
 	if err != nil {
 		return scanner.Scanner{}, nil, err
 	}

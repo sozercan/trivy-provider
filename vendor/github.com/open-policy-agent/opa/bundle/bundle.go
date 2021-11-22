@@ -18,15 +18,13 @@ import (
 	"reflect"
 	"strings"
 
-	"github.com/open-policy-agent/opa/format"
-
-	"github.com/open-policy-agent/opa/internal/file/archive"
-	"github.com/open-policy-agent/opa/internal/merge"
-	"github.com/open-policy-agent/opa/metrics"
-
 	"github.com/pkg/errors"
 
 	"github.com/open-policy-agent/opa/ast"
+	"github.com/open-policy-agent/opa/format"
+	"github.com/open-policy-agent/opa/internal/file/archive"
+	"github.com/open-policy-agent/opa/internal/merge"
+	"github.com/open-policy-agent/opa/metrics"
 	"github.com/open-policy-agent/opa/util"
 )
 
@@ -55,6 +53,7 @@ type Bundle struct {
 // SignaturesConfig represents an array of JWTs that encapsulate the signatures for the bundle.
 type SignaturesConfig struct {
 	Signatures []string `json:"signatures,omitempty"`
+	Plugin     string   `json:"plugin,omitempty"`
 }
 
 // isEmpty returns if the SignaturesConfig is empty.
@@ -90,9 +89,10 @@ func NewFile(name, hash, alg string) FileInfo {
 // Manifest represents the manifest from a bundle. The manifest may contain
 // metadata such as the bundle revision.
 type Manifest struct {
-	Revision      string         `json:"revision"`
-	Roots         *[]string      `json:"roots,omitempty"`
-	WasmResolvers []WasmResolver `json:"wasm,omitempty"`
+	Revision      string                 `json:"revision"`
+	Roots         *[]string              `json:"roots,omitempty"`
+	WasmResolvers []WasmResolver         `json:"wasm,omitempty"`
+	Metadata      map[string]interface{} `json:"metadata,omitempty"`
 }
 
 // WasmResolver maps a wasm module to an entrypoint ref.
@@ -139,6 +139,10 @@ func (m Manifest) Equal(other Manifest) bool {
 		}
 	}
 
+	if !reflect.DeepEqual(m.Metadata, other.Metadata) {
+		return false
+	}
+
 	return m.rootSet().Equal(other.rootSet())
 }
 
@@ -152,6 +156,15 @@ func (m Manifest) Copy() Manifest {
 	wasmModules := make([]WasmResolver, len(m.WasmResolvers))
 	copy(wasmModules, m.WasmResolvers)
 	m.WasmResolvers = wasmModules
+
+	metadata := m.Metadata
+
+	if metadata != nil {
+		m.Metadata = make(map[string]interface{})
+		for k, v := range metadata {
+			m.Metadata[k] = v
+		}
+	}
 
 	return m
 }
@@ -298,6 +311,7 @@ type Reader struct {
 	baseDir               string
 	verificationConfig    *VerificationConfig
 	skipVerify            bool
+	processAnnotations    bool
 	files                 map[string]FileInfo // files in the bundle signature payload
 	sizeLimitBytes        int64
 }
@@ -348,6 +362,12 @@ func (r *Reader) WithBundleVerificationConfig(config *VerificationConfig) *Reade
 // WithSkipBundleVerification skips verification of a signed bundle
 func (r *Reader) WithSkipBundleVerification(skipVerify bool) *Reader {
 	r.skipVerify = skipVerify
+	return r
+}
+
+// WithProcessAnnotations enables annotation processing during .rego file parsing.
+func (r *Reader) WithProcessAnnotations(yes bool) *Reader {
+	r.processAnnotations = yes
 	return r
 }
 
@@ -412,7 +432,7 @@ func (r *Reader) Read() (Bundle, error) {
 		if strings.HasSuffix(path, RegoExt) {
 			fullPath := r.fullPath(path)
 			r.metrics.Timer(metrics.RegoModuleParse).Start()
-			module, err := ast.ParseModule(fullPath, buf.String())
+			module, err := ast.ParseModuleWithOpts(fullPath, buf.String(), ast.ParserOptions{ProcessAnnotation: r.processAnnotations})
 			r.metrics.Timer(metrics.RegoModuleParse).Stop()
 			if err != nil {
 				return bundle, err
@@ -537,7 +557,7 @@ func (r *Reader) checkSignaturesAndDescriptors(signatures SignaturesConfig) erro
 		return nil
 	}
 
-	if signatures.isEmpty() && r.verificationConfig != nil {
+	if signatures.isEmpty() && r.verificationConfig != nil && r.verificationConfig.KeyID != "" {
 		return fmt.Errorf("bundle missing .signatures.json file")
 	}
 
@@ -584,7 +604,6 @@ type Writer struct {
 	usePath       bool
 	disableFormat bool
 	w             io.Writer
-	signingConfig *SigningConfig
 }
 
 // NewWriter returns a bundle writer that writes to w.
@@ -677,6 +696,10 @@ func (w *Writer) writeWasm(tw *tar.Writer, bundle Bundle) error {
 }
 
 func writeManifest(tw *tar.Writer, bundle Bundle) error {
+
+	if bundle.Manifest.Equal(Manifest{}) {
+		return nil
+	}
 
 	var buf bytes.Buffer
 
@@ -799,6 +822,10 @@ func (b *Bundle) GenerateSignature(signingConfig *SigningConfig, keyID string, u
 
 	if b.Signatures.isEmpty() {
 		b.Signatures = SignaturesConfig{}
+	}
+
+	if signingConfig.Plugin != "" {
+		b.Signatures.Plugin = signingConfig.Plugin
 	}
 
 	b.Signatures.Signatures = []string{string(token)}

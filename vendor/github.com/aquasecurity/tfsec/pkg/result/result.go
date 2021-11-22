@@ -15,17 +15,20 @@ import (
 // by, a human-readable description and a range
 type Result struct {
 	RuleID          string            `json:"rule_id"`
+	LegacyRuleID    string            `json:"legacy_rule_id"`
 	RuleSummary     string            `json:"rule_description"`
 	RuleProvider    provider.Provider `json:"rule_provider"`
 	Impact          string            `json:"impact"`
 	Resolution      string            `json:"resolution"`
 	Links           []string          `json:"links"`
-	Range           block.Range       `json:"location"`
 	Description     string            `json:"description"`
 	RangeAnnotation string            `json:"-"`
 	Severity        severity.Severity `json:"severity"`
 	Status          Status            `json:"status"`
-	topLevelBlock   block.Block
+	Location        block.Range       `json:"location"`
+	Resource        string            `json:"resource"`
+	blocks          block.Blocks
+	attribute       block.Attribute
 }
 
 type Status string
@@ -37,22 +40,54 @@ const (
 )
 
 func New(resourceBlock block.Block) *Result {
-	return &Result{
-		Status:        Failed,
-		topLevelBlock: resourceBlock,
+	result := &Result{
+		Status: Failed,
+		blocks: []block.Block{resourceBlock},
 	}
+	result.Location = result.Range()
+	if resourceBlock != nil && resourceBlock.Reference() != nil {
+		result.Resource = resourceBlock.Reference().String()
+	}
+	return result
 }
 
 func (r *Result) Passed() bool {
 	return r.Status == Passed
 }
 
+func (r *Result) Blocks() block.Blocks {
+	return r.blocks
+}
+
+func (r *Result) IsOnAttribute() bool {
+	return r.attribute != nil
+}
+
+func (r *Result) Range() block.Range {
+	if r.attribute != nil {
+		return r.attribute.Range()
+	}
+	return r.blocks[len(r.blocks)-1].Range()
+}
+
 func (r *Result) HashCode() string {
-	return fmt.Sprintf("%s:%s", r.Range, r.RuleID)
+	var hash string
+	for _, block := range r.blocks {
+		hash += "!" + block.UniqueName()
+	}
+	if r.attribute != nil {
+		hash += ":" + r.attribute.Name() + ":" + r.attribute.Range().String()
+	}
+	return fmt.Sprintf("%s:%s", hash, r.RuleID)
 }
 
 func (r *Result) WithRuleID(id string) *Result {
 	r.RuleID = id
+	return r
+}
+
+func (r *Result) WithLegacyRuleID(id string) *Result {
+	r.LegacyRuleID = id
 	return r
 }
 
@@ -86,13 +121,21 @@ func (r *Result) WithLinks(links []string) *Result {
 	return r
 }
 
-func (r *Result) WithRange(codeRange block.Range) *Result {
-	r.Range = codeRange
+func (r *Result) WithBlock(block block.Block) *Result {
+	if block.IsNil() {
+		return r
+	}
+	r.blocks = append(r.blocks, block)
 	return r
 }
 
-func (r *Result) WithDescription(description string) *Result {
-	r.Description = description
+func (r *Result) WithDescription(description string, parts ...interface{}) *Result {
+	if len(parts) == 0 {
+		r.Description = description
+	} else {
+		r.Description = fmt.Sprintf(description, parts...)
+	}
+
 	return r
 }
 
@@ -106,7 +149,13 @@ func (r *Result) WithStatus(status Status) *Result {
 	return r
 }
 
-func (r *Result) WithAttributeAnnotation(attr block.Attribute) *Result {
+func (r *Result) WithAttribute(attr block.Attribute) *Result {
+
+	if attr.IsNil() {
+		return r
+	}
+
+	r.attribute = attr
 
 	var raw string
 
@@ -143,9 +192,13 @@ func (r *Result) WithAttributeAnnotation(attr block.Attribute) *Result {
 			}
 			typeStr = "list"
 			raw = fmt.Sprintf("[%s]", strings.Join(strValues, ", "))
+		default:
+			typeStr = "unknown"
+			raw = "???"
 		}
 	}
 
 	r.RangeAnnotation = fmt.Sprintf("%s: %s", typeStr, raw)
+	r.Location = r.Range()
 	return r
 }

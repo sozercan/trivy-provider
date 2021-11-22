@@ -24,19 +24,14 @@ import (
 	"net/url"
 	"strings"
 
+	"github.com/google/go-containerregistry/internal/verify"
 	"github.com/google/go-containerregistry/pkg/logs"
 	"github.com/google/go-containerregistry/pkg/name"
 	v1 "github.com/google/go-containerregistry/pkg/v1"
 	"github.com/google/go-containerregistry/pkg/v1/partial"
 	"github.com/google/go-containerregistry/pkg/v1/remote/transport"
 	"github.com/google/go-containerregistry/pkg/v1/types"
-	"github.com/google/go-containerregistry/pkg/v1/v1util"
 )
-
-var defaultPlatform = v1.Platform{
-	Architecture: "amd64",
-	OS:           "linux",
-}
 
 // ErrSchema1 indicates that we received a schema1 manifest from the registry.
 // This library doesn't have plans to support this legacy image format:
@@ -76,6 +71,8 @@ func (d *Descriptor) RawManifest() ([]byte, error) {
 // Get returns a remote.Descriptor for the given reference. The response from
 // the registry is left un-interpreted, for the most part. This is useful for
 // querying what kind of artifact a reference represents.
+//
+// See Head if you don't need the response body.
 func Get(ref name.Reference, options ...Option) (*Descriptor, error) {
 	acceptable := []types.MediaType{
 		// Just to look at them.
@@ -85,6 +82,33 @@ func Get(ref name.Reference, options ...Option) (*Descriptor, error) {
 	acceptable = append(acceptable, acceptableImageMediaTypes...)
 	acceptable = append(acceptable, acceptableIndexMediaTypes...)
 	return get(ref, acceptable, options...)
+}
+
+// Head returns a v1.Descriptor for the given reference by issuing a HEAD
+// request.
+//
+// Note that the server response will not have a body, so any errors encountered
+// should be retried with Get to get more details.
+func Head(ref name.Reference, options ...Option) (*v1.Descriptor, error) {
+	acceptable := []types.MediaType{
+		// Just to look at them.
+		types.DockerManifestSchema1,
+		types.DockerManifestSchema1Signed,
+	}
+	acceptable = append(acceptable, acceptableImageMediaTypes...)
+	acceptable = append(acceptable, acceptableIndexMediaTypes...)
+
+	o, err := makeOptions(ref.Context(), options...)
+	if err != nil {
+		return nil, err
+	}
+
+	f, err := makeFetcher(ref, o)
+	if err != nil {
+		return nil, err
+	}
+
+	return f.headManifest(ref, acceptable)
 }
 
 // Handle options and fetch the manifest with the acceptable MediaTypes in the
@@ -193,7 +217,7 @@ type fetcher struct {
 }
 
 func makeFetcher(ref name.Reference, o *options) (*fetcher, error) {
-	tr, err := transport.New(ref.Context().Registry, o.auth, o.transport, []string{ref.Scope(transport.PullScope)})
+	tr, err := transport.NewWithContext(o.context, ref.Context().Registry, o.auth, o.transport, []string{ref.Scope(transport.PullScope)})
 	if err != nil {
 		return nil, err
 	}
@@ -277,14 +301,71 @@ func (f *fetcher) fetchManifest(ref name.Reference, acceptable []types.MediaType
 	return manifest, &desc, nil
 }
 
-func (f *fetcher) fetchBlob(h v1.Hash) (io.ReadCloser, error) {
+func (f *fetcher) headManifest(ref name.Reference, acceptable []types.MediaType) (*v1.Descriptor, error) {
+	u := f.url("manifests", ref.Identifier())
+	req, err := http.NewRequest(http.MethodHead, u.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+	accept := []string{}
+	for _, mt := range acceptable {
+		accept = append(accept, string(mt))
+	}
+	req.Header.Set("Accept", strings.Join(accept, ","))
+
+	resp, err := f.Client.Do(req.WithContext(f.context))
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if err := transport.CheckError(resp, http.StatusOK); err != nil {
+		return nil, err
+	}
+
+	mth := resp.Header.Get("Content-Type")
+	if mth == "" {
+		return nil, fmt.Errorf("HEAD %s: response did not include Content-Type header", u.String())
+	}
+	mediaType := types.MediaType(mth)
+
+	size := resp.ContentLength
+	if size == -1 {
+		return nil, fmt.Errorf("GET %s: response did not include Content-Length header", u.String())
+	}
+
+	dh := resp.Header.Get("Docker-Content-Digest")
+	if dh == "" {
+		return nil, fmt.Errorf("HEAD %s: response did not include Docker-Content-Digest header", u.String())
+	}
+	digest, err := v1.NewHash(dh)
+	if err != nil {
+		return nil, err
+	}
+
+	// Validate the digest matches what we asked for, if pulling by digest.
+	if dgst, ok := ref.(name.Digest); ok {
+		if digest.String() != dgst.DigestStr() {
+			return nil, fmt.Errorf("manifest digest: %q does not match requested digest: %q for %q", digest, dgst.DigestStr(), f.Ref)
+		}
+	}
+
+	// Return all this info since we have to calculate it anyway.
+	return &v1.Descriptor{
+		Digest:    digest,
+		Size:      size,
+		MediaType: mediaType,
+	}, nil
+}
+
+func (f *fetcher) fetchBlob(ctx context.Context, size int64, h v1.Hash) (io.ReadCloser, error) {
 	u := f.url("blobs", h.String())
 	req, err := http.NewRequest(http.MethodGet, u.String(), nil)
 	if err != nil {
 		return nil, err
 	}
 
-	resp, err := f.Client.Do(req.WithContext(f.context))
+	resp, err := f.Client.Do(req.WithContext(ctx))
 	if err != nil {
 		return nil, err
 	}
@@ -294,7 +375,18 @@ func (f *fetcher) fetchBlob(h v1.Hash) (io.ReadCloser, error) {
 		return nil, err
 	}
 
-	return v1util.VerifyReadCloser(resp.Body, h)
+	// Do whatever we can.
+	// If we have an expected size and Content-Length doesn't match, return an error.
+	// If we don't have an expected size and we do have a Content-Length, use Content-Length.
+	if hsize := resp.ContentLength; hsize != -1 {
+		if size == verify.SizeUnknown {
+			size = hsize
+		} else if hsize != size {
+			return nil, fmt.Errorf("GET %s: Content-Length header %d does not match expected size %d", u.String(), hsize, size)
+		}
+	}
+
+	return verify.ReadCloser(resp.Body, size, h)
 }
 
 func (f *fetcher) headBlob(h v1.Hash) (*http.Response, error) {
@@ -315,4 +407,24 @@ func (f *fetcher) headBlob(h v1.Hash) (*http.Response, error) {
 	}
 
 	return resp, nil
+}
+
+func (f *fetcher) blobExists(h v1.Hash) (bool, error) {
+	u := f.url("blobs", h.String())
+	req, err := http.NewRequest(http.MethodHead, u.String(), nil)
+	if err != nil {
+		return false, err
+	}
+
+	resp, err := f.Client.Do(req.WithContext(f.context))
+	if err != nil {
+		return false, err
+	}
+	defer resp.Body.Close()
+
+	if err := transport.CheckError(resp, http.StatusOK, http.StatusNotFound); err != nil {
+		return false, err
+	}
+
+	return resp.StatusCode == http.StatusOK, nil
 }

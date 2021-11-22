@@ -6,6 +6,7 @@ package topdown
 
 import (
 	"fmt"
+	"math/big"
 	"sort"
 	"strings"
 
@@ -87,6 +88,18 @@ func builtinConcat(a, b ast.Value) (ast.Value, error) {
 }
 
 func builtinIndexOf(a, b ast.Value) (ast.Value, error) {
+	runesEqual := func(a, b []rune) bool {
+		if len(a) != len(b) {
+			return false
+		}
+		for i, v := range a {
+			if v != b[i] {
+				return false
+			}
+		}
+		return true
+	}
+
 	base, err := builtins.StringOperand(a, 1)
 	if err != nil {
 		return nil, err
@@ -96,9 +109,25 @@ func builtinIndexOf(a, b ast.Value) (ast.Value, error) {
 	if err != nil {
 		return nil, err
 	}
+	if len(string(search)) == 0 {
+		return nil, fmt.Errorf("empty search character")
+	}
 
-	index := strings.Index(string(base), string(search))
-	return ast.IntNumberTerm(index).Value, nil
+	baseRunes := []rune(string(base))
+	searchRunes := []rune(string(search))
+	searchLen := len(searchRunes)
+
+	for i, r := range baseRunes {
+		if r == searchRunes[0] {
+			if len(baseRunes) >= i+searchLen {
+				if runesEqual(baseRunes[i:i+searchLen], searchRunes) {
+					return ast.IntNumberTerm(i).Value, nil
+				}
+			}
+		}
+	}
+
+	return ast.IntNumberTerm(-1).Value, nil
 }
 
 func builtinSubstring(a, b, c ast.Value) (ast.Value, error) {
@@ -366,6 +395,8 @@ func builtinSprintf(a, b ast.Value) (ast.Value, error) {
 		case ast.Number:
 			if n, ok := v.Int(); ok {
 				args[i] = n
+			} else if b, ok := new(big.Int).SetString(v.String(), 10); ok {
+				args[i] = b
 			} else if f, ok := v.Float64(); ok {
 				args[i] = f
 			} else {

@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/aquasecurity/tfsec/internal/app/tfsec/block"
+	"github.com/hashicorp/hcl/v2"
 
 	"github.com/aquasecurity/tfsec/internal/app/tfsec/debug"
 	"github.com/aquasecurity/tfsec/internal/app/tfsec/metrics"
@@ -20,6 +21,8 @@ type Parser struct {
 	tfvarsPaths    []string
 	stopOnFirstTf  bool
 	stopOnHCLError bool
+	workspaceName  string
+	skipDownloaded bool
 }
 
 // New creates a new Parser
@@ -27,6 +30,7 @@ func New(initialPath string, options ...Option) *Parser {
 	p := &Parser{
 		initialPath:   initialPath,
 		stopOnFirstTf: true,
+		workspaceName: "default",
 	}
 
 	for _, option := range options {
@@ -36,8 +40,32 @@ func New(initialPath string, options ...Option) *Parser {
 	return p
 }
 
+
+func (parser *Parser) parseDirectoryFiles(files []*hcl.File) ( block.Blocks, error) {
+	var blocks block.Blocks
+
+	for _, file := range files {
+		fileBlocks, err := LoadBlocksFromFile(file)
+		if err != nil {
+			if parser.stopOnHCLError {
+				return nil, err
+			}
+			_, _ = fmt.Fprintf(os.Stderr, "WARNING: HCL error: %s\n", err)
+			continue
+		}
+		if len(fileBlocks) > 0 {
+			debug.Log("Added %d blocks from %s...", len(fileBlocks), fileBlocks[0].DefRange.Filename)
+		}
+		for _, fileBlock := range fileBlocks {
+			blocks = append(blocks, block.NewHCLBlock(fileBlock, nil, nil))
+		}
+	}
+
+	return blocks, nil
+}
+
 // ParseDirectory parses all terraform files within a given directory
-func (parser *Parser) ParseDirectory() (block.Blocks, error) {
+func (parser *Parser) ParseDirectory() ([]block.Module, error) {
 
 	debug.Log("Finding Terraform subdirectories...")
 	t := metrics.Start(metrics.DiskIO)
@@ -50,28 +78,22 @@ func (parser *Parser) ParseDirectory() (block.Blocks, error) {
 	var blocks block.Blocks
 
 	for _, dir := range subdirectories {
+		if parser.skipDownloaded && strings.Contains(dir, ".terraform") {
+			fmt.Printf("skipping download module file %s\n", dir)
+			continue
+		}
 		debug.Log("Beginning parse for directory '%s'...", dir)
 		files, err := LoadDirectory(dir, parser.stopOnHCLError)
 		if err != nil {
 			return nil, err
 		}
 
-		for _, file := range files {
-			fileBlocks, err := LoadBlocksFromFile(file)
-			if err != nil {
-				if parser.stopOnHCLError {
-					return nil, err
-				}
-				_, _ = fmt.Fprintf(os.Stderr, "WARNING: HCL error: %s\n", err)
-				continue
-			}
-			if len(fileBlocks) > 0 {
-				debug.Log("Added %d blocks from %s...", len(fileBlocks), fileBlocks[0].DefRange.Filename)
-			}
-			for _, fileBlock := range fileBlocks {
-				blocks = append(blocks, block.NewHCLBlock(fileBlock, nil, nil))
-			}
+		parsedBlocks, err := parser.parseDirectoryFiles(files);
+		if err != nil {
+			return nil, err
 		}
+
+		blocks = append(blocks, parsedBlocks...)
 	}
 
 	metrics.Add(metrics.BlocksLoaded, len(blocks))
@@ -93,23 +115,24 @@ func (parser *Parser) ParseDirectory() (block.Blocks, error) {
 		return nil, err
 	}
 
-	debug.Log("Loading module metadata...")
-	t = metrics.Start(metrics.DiskIO)
-	modulesMetadata, _ := LoadModuleMetadata(tfPath)
-	t.Stop()
-
-	debug.Log("Loading modules...")
-	modules := LoadModules(blocks, tfPath, modulesMetadata, parser.stopOnHCLError)
-	var visited []*visitedModule
+	var modulesMetadata *ModulesMetadata
+	if parser.skipDownloaded {
+		debug.Log("Skipping module metadata loading, --exclude-downloaded-modules passed")
+	} else {
+		debug.Log("Loading module metadata...")
+		t = metrics.Start(metrics.DiskIO)
+		modulesMetadata, _ = LoadModuleMetadata(tfPath)
+		t.Stop()
+	}
 
 	debug.Log("Evaluating expressions...")
-	evaluator := NewEvaluator(tfPath, tfPath, blocks, inputVars, modulesMetadata, modules, visited, parser.stopOnHCLError)
-	evaluatedBlocks, err := evaluator.EvaluateAll()
+	workingDir, _ := os.Getwd()
+	evaluator := NewEvaluator(tfPath, tfPath, workingDir, blocks, inputVars, modulesMetadata, nil, parser.stopOnHCLError, parser.workspaceName)
+	modules, err := evaluator.EvaluateAll()
 	if err != nil {
 		return nil, err
 	}
-	metrics.Add(metrics.BlocksEvaluated, len(evaluatedBlocks))
-	return evaluatedBlocks, nil
+	return modules, nil
 
 }
 
